@@ -29,11 +29,11 @@ err()  { echo -e "${clrRed}[ERROR]${clrReset} ${*:-}"; }
 hr()   { echo -e "${clrDim}────────────────────────────────────────────────────────${clrReset}"; }
 
 SCRIPT_NAME="Arcium-Node-Hub"
-SCRIPT_VERSION="0.3.0"
+SCRIPT_VERSION="0.0.2"
 LANG_CHOICE="ru"
 BASE_DIR_DEFAULT="$HOME/arcium-node-setup"
 ENV_FILE_DEFAULT="$HOME/arcium-node-setup/.env"
-IMAGE_DEFAULT="arcium/arx-node:v0.3.0"
+IMAGE_DEFAULT="arcium/arx-node:v0.0.2"
 CONTAINER_DEFAULT="arx-node"
 RPC_DEFAULT_HTTP="https://api.devnet.solana.com"
 RPC_DEFAULT_WSS="wss://api.devnet.solana.com"
@@ -288,10 +288,10 @@ install_arcium_tooling() {
   mkdir -p "$HOME/.cargo/bin" || true
   local target="x86_64_linux"; [[ $(uname -m) =~ (aarch64|arm64) ]] && target="aarch64_linux"
   info "Installing arcup (platform: $target)"
-  curl -fsSL "https://bin.arcium.com/download/arcup_${target}_0.3.0" -o "$HOME/.cargo/bin/arcup"
+  curl -fsSL "https://bin.arcium.com/download/arcup_${target}_0.0.2" -o "$HOME/.cargo/bin/arcup"
   chmod +x "$HOME/.cargo/bin/arcup"
   if ! command -v arcium >/dev/null 2>&1; then
-    info "Installing Arcium CLI 0.3.0"
+    info "Installing Arcium CLI 0.0.2"
     "$HOME/.cargo/bin/arcup" install || true
   fi
   # ensure arcium is on PATH now and for future shells
