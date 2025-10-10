@@ -472,7 +472,7 @@ _get_offset_or_prompt() {
     sanitize_offset
   fi
 
-  # лёгкая валидация: 7–10 цифр выглядит реалистично
+  # лёгкая валидация: 8–10 цифр выглядит реалистично
   if [[ -n "${OFFSET:-}" ]]; then
     if ! [[ "$OFFSET" =~ ^[0-9]+$ ]]; then
       warn "OFFSET должен содержать только цифры."
@@ -480,8 +480,8 @@ _get_offset_or_prompt() {
       sanitize_offset
     fi
     local len=${#OFFSET}
-    if (( len < 7 || len > 10 )); then
-      warn "OFFSET выглядит странно ($OFFSET). Введите корректный 7–10-значный OFFSET."
+    if (( len < 8 || len > 10 )); then
+      warn "OFFSET выглядит странно ($OFFSET). Введите корректный 8–10-значный OFFSET."
       read -rp "$(tr ask_offset) " OFFSET
       sanitize_offset
     fi
