@@ -29,11 +29,11 @@ err()  { echo -e "${clrRed}[ERROR]${clrReset} ${*:-}"; }
 hr()   { echo -e "${clrDim}────────────────────────────────────────────────────────${clrReset}"; }
 
 SCRIPT_NAME="Arcium-Node-Hub"
-SCRIPT_VERSION="0.1.0"
+SCRIPT_VERSION="0.3.0"
 LANG_CHOICE="ru"
 BASE_DIR_DEFAULT="$HOME/arcium-node-setup"
 ENV_FILE_DEFAULT="$HOME/arcium-node-setup/.env"
-IMAGE_DEFAULT="arcium/arx-node:v0.0.1"
+IMAGE_DEFAULT="arcium/arx-node:v0.3.0"
 CONTAINER_DEFAULT="arx-node"
 RPC_DEFAULT_HTTP="https://api.devnet.solana.com"
 RPC_DEFAULT_WSS="wss://api.devnet.solana.com"
@@ -119,6 +119,7 @@ tr() {
       show_keys) echo "Show keys & balances";;
       airdrop_try) echo "Attempting Devnet airdrop...";;
       need_funds) echo "Accounts have 0 SOL. Fund them on Devnet and retry.";;
+      ask_target_node_offset) echo "Enter the NODE OFFSET you want to invite (leave empty to use your own): " ;;
 
     esac;;
     *) case "$k" in
@@ -172,6 +173,7 @@ tr() {
       show_keys) echo "Показать ключи и балансы";;
       airdrop_try) echo "Пробую запросить Devnet airdrop...";;
       need_funds) echo "На аккаунтах 0 SOL. Пополните их на Devnet и повторите.";;
+      ask_target_node_offset) echo "Введи OFFSET ноды, которую приглашаешь (пусто — использовать свой): " ;;
 
     esac;;
   esac
@@ -181,6 +183,9 @@ need_sudo() { if [[ $(id -u) -ne 0 ]] && ! command -v sudo >/dev/null 2>&1; then
 run_root() { if [[ $(id -u) -ne 0 ]]; then sudo bash -lc "$*"; else bash -lc "$*"; fi; }
 ensure_cmd() { command -v "$1" >/dev/null 2>&1; }
 path_prepend() { case ":$PATH:" in *":$1:"*) :;; *) PATH="$1:$PATH"; export PATH;; esac; }
+path_prepend "$HOME/.cargo/bin"
+path_prepend "$HOME/.local/share/solana/install/active_release/bin"
+path_prepend "$HOME/.arcium/bin"
 
 sanitize_offset() {
   if [[ -n "${OFFSET:-}" ]]; then
@@ -283,9 +288,15 @@ install_arcium_tooling() {
   mkdir -p "$HOME/.cargo/bin" || true
   local target="x86_64_linux"; [[ $(uname -m) =~ (aarch64|arm64) ]] && target="aarch64_linux"
   info "Installing arcup (platform: $target)"
-  curl -fsSL "https://bin.arcium.com/download/arcup_${target}_0.0.1" -o "$HOME/.cargo/bin/arcup"
+  curl -fsSL "https://bin.arcium.com/download/arcup_${target}_0.3.0" -o "$HOME/.cargo/bin/arcup"
   chmod +x "$HOME/.cargo/bin/arcup"
-  if ! command -v arcium >/dev/null 2>&1; then info "Installing Arcium CLI 0.0.1"; "$HOME/.cargo/bin/arcup" install || true; fi
+  if ! command -v arcium >/dev/null 2>&1; then
+    info "Installing Arcium CLI 0.3.0"
+    "$HOME/.cargo/bin/arcup" install || true
+  fi
+  # ensure arcium is on PATH now and for future shells
+  path_prepend "$HOME/.arcium/bin"
+  grep -q '\.arcium/bin' "$HOME/.bashrc" 2>/dev/null || echo 'export PATH="$HOME/.arcium/bin:$PATH"' >> "$HOME/.bashrc"
   ok "Arcium CLI ready"
 }
 install_prereqs() {
@@ -452,9 +463,30 @@ show_logs_follow() { clear; display_logo; hr; echo -e "${clrBold}${clrMag}$(tr l
 }
 
 _get_offset_or_prompt() {
-  ensure_offsets; sanitize_offset
-  if [[ -n "${OFFSET:-}" ]]; then info "Using node OFFSET: ${OFFSET}"; return 0; fi
-  read -rp "$(tr ask_offset) " OFFSET; sanitize_offset
+  ensure_offsets
+  sanitize_offset
+  if [[ -n "${OFFSET:-}" ]]; then
+    info "Using node OFFSET: ${OFFSET}"
+  else
+    read -rp "$(tr ask_offset) " OFFSET
+    sanitize_offset
+  fi
+
+  # лёгкая валидация: 7–10 цифр выглядит реалистично
+  if [[ -n "${OFFSET:-}" ]]; then
+    if ! [[ "$OFFSET" =~ ^[0-9]+$ ]]; then
+      warn "OFFSET должен содержать только цифры."
+      read -rp "$(tr ask_offset) " OFFSET
+      sanitize_offset
+    fi
+    local len=${#OFFSET}
+    if (( len < 7 || len > 10 )); then
+      warn "OFFSET выглядит странно ($OFFSET). Введите корректный 7–10-значный OFFSET."
+      read -rp "$(tr ask_offset) " OFFSET
+      sanitize_offset
+    fi
+  fi
+
   [[ -z "${OFFSET:-}" ]] && { warn "OFFSET пустой — операция отменена."; return 1; }
   return 0
 }
@@ -501,37 +533,67 @@ join_cluster() {
 propose_join_cluster() {
   clear; display_logo; hr
   echo -e "${clrBold}${clrMag}$(tr propose_join_lbl)${clrReset}\n"; hr
+
+  # 1) Кластер
   local cur_cluster="${CLUSTER_OFFSET:-}" ans
   read -rp "$(tr ask_cluster_offset) ${cur_cluster:+[$cur_cluster]} " ans
   local cluster_offset="${ans:-$cur_cluster}"
   [[ -z "$cluster_offset" ]] && { cluster_offset="10102025"; info "CLUSTER OFFSET не указан — использую по умолчанию: $cluster_offset"; }
-  if ! _get_offset_or_prompt; then
+
+  # 2) Чей OFFSET отправляем в заявку (по умолчанию свой)
+  ensure_offsets; sanitize_offset
+  local default_node="$OFFSET"
+  read -rp "$(tr ask_target_node_offset) ${default_node:+[$default_node]} " ans
+  local target_node_offset="${ans:-$default_node}"
+  target_node_offset="$(printf '%s\n' "$target_node_offset" | sed -n 's/[^0-9]*\([0-9][0-9]*\).*/\1/p')"
+  if [[ -z "$target_node_offset" ]]; then
+    warn "OFFSET ноды пустой — операция отменена."
     echo -e "\n$(tr press_enter)"; read -r; return
   fi
+
+  # 3) Проверка ключа-авторитета (у владельца кластера должен быть ключ с правами на кластер)
   if [[ ! -f "$NODE_KP" ]]; then
     err "Ключ не найден: $NODE_KP"
     echo -e "\n$(tr press_enter)"; read -r; return
   fi
-  info "Proposing node_offset=$OFFSET to cluster_offset=$cluster_offset"
+
+  # 4) Предпроверка: не находится ли эта нода уже в кластере
+  info "Проверяю членство ноды $target_node_offset в кластере $cluster_offset..."
+  if arcium arx-info "$target_node_offset" --rpc-url "$RPC_HTTP" | awk -v c="$cluster_offset" '
+      /^Cluster memberships:/ { inlist=1; next }
+      inlist {
+        if ($0 ~ /^[[:space:]]*$/) { inlist=0; next }
+        if (index($0, c)) { found=1 }
+      }
+      END { exit(found ? 0 : 1) }
+    ' >/dev/null; then
+    warn "Нода $target_node_offset уже в кластере $cluster_offset — заявку отправлять не нужно."
+    echo -e "\n$(tr press_enter)"; read -r; return
+  fi
+
+  # 5) Отправляем заявку
+  info "Proposing node_offset=${target_node_offset} to cluster_offset=${cluster_offset}"
   local key_dir; key_dir="$(dirname "$NODE_KP")"
   if [[ -d "$key_dir" ]]; then
-    ( cd "$key_dir" && \
-      arcium propose-join-cluster \
+    ( cd "$key_dir" && arcium propose-join-cluster \
         --keypair-path "$NODE_KP" \
-        --node-offset "$OFFSET" \
+        --node-offset "$target_node_offset" \
         --cluster-offset "$cluster_offset" \
-        --rpc-url "$RPC_HTTP" ) && ok "Proposal sent"
+        --rpc-url "$RPC_HTTP" ) && ok "Заявка отправлена"
     cd "$HOME" || true
   else
     arcium propose-join-cluster \
       --keypair-path "$NODE_KP" \
-      --node-offset "$OFFSET" \
+      --node-offset "$target_node_offset" \
       --cluster-offset "$cluster_offset" \
-      --rpc-url "$RPC_HTTP" && ok "Proposal sent"
+      --rpc-url "$RPC_HTTP" && ok "Заявка отправлена"
   fi
+
+  # 6) Сохраним кластер в .env
   CLUSTER_OFFSET="$cluster_offset"; save_env
   echo -e "\n$(tr press_enter)"; read -r
 }
+
 check_membership_single() {
   ensure_offsets; sanitize_offset
   local cur_cluster="${CLUSTER_OFFSET:-}" ans; read -rp "$(tr ask_cluster_offset) ${cur_cluster:+[$cur_cluster]} " ans
