@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # =====================================================================
 #  Arcium-Node-Hub — RU/EN interactive installer/manager (Docker)
-#  Version: 0.3.0 (split: Server prep vs Node install; faucet/airdrop gate)
+#  Version: 0.1.0 (split: Server prep vs Node install; faucet/airdrop gate)
 # =====================================================================
 set -Eeuo pipefail
 
@@ -462,29 +462,75 @@ node_status() { clear; display_logo; hr; echo -e "${clrBold}${clrMag}$(tr tools_
 node_active() { clear; display_logo; hr; echo -e "${clrBold}${clrMag}$(tr tools_active)${clrReset}\n"; hr; if _get_offset_or_prompt; then arcium arx-active "$OFFSET" --rpc-url "$RPC_HTTP" || true; fi; }
 
 join_cluster() {
-  clear; display_logo; hr; echo -e "${clrBold}${clrMag}$(tr join_cluster_lbl)${clrReset}\n"; hr
-  if !_get_offset_or_prompt; then echo -e "\n$(tr press_enter)"; read -r; return; fi
-  local cur_cluster="${CLUSTER_OFFSET:-}" ans; read -rp "$(tr ask_cluster_offset) ${cur_cluster:+[$cur_cluster]} " ans
+  clear; display_logo; hr
+  echo -e "${clrBold}${clrMag}$(tr join_cluster_lbl)${clrReset}\n"; hr
+  if ! _get_offset_or_prompt; then
+    echo -e "\n$(tr press_enter)"; read -r; return
+  fi
+  local cur_cluster="${CLUSTER_OFFSET:-}" ans
+  read -rp "$(tr ask_cluster_offset) ${cur_cluster:+[$cur_cluster]} " ans
   local cluster_offset="${ans:-$cur_cluster}"
-  [[ -z "$cluster_offset" ]] && { warn "cluster_offset пустой — операция отменена."; echo -e "\n$(tr press_enter)"; read -r; return; }
-  [[ -f "$NODE_KP" ]] || { err "Файл ключа ноды не найден: $NODE_KP"; echo -e "\n$(tr press_enter)"; read -r; return; }
+  if [[ -z "$cluster_offset" ]]; then
+    warn "cluster_offset пустой — операция отменена."
+    echo -e "\n$(tr press_enter)"; read -r; return
+  fi
+  if [[ ! -f "$NODE_KP" ]]; then
+    err "Файл ключа ноды не найден: $NODE_KP"
+    echo -e "\n$(tr press_enter)"; read -r; return
+  fi
   info "Joining cluster: node_offset=$OFFSET, cluster_offset=$cluster_offset"
   local key_dir; key_dir="$(dirname "$NODE_KP")"
-  if [[ -d "$key_dir" ]]; then ( cd "$key_dir" && arcium join-cluster true --keypair-path "$NODE_KP" --node-offset "$OFFSET" --cluster-offset "$cluster_offset" --rpc-url "$RPC_HTTP" ); cd "$HOME" || true
-  else arcium join-cluster true --keypair-path "$NODE_KP" --node-offset "$OFFSET" --cluster-offset "$cluster_offset" --rpc-url "$RPC_HTTP"; fi
-  CLUSTER_OFFSET="$cluster_offset"; save_env; echo -e "\n$(tr press_enter)"; read -r
+  if [[ -d "$key_dir" ]]; then
+    ( cd "$key_dir" && \
+      arcium join-cluster true \
+        --keypair-path "$NODE_KP" \
+        --node-offset "$OFFSET" \
+        --cluster-offset "$cluster_offset" \
+        --rpc-url "$RPC_HTTP" )
+    cd "$HOME" || true
+  else
+    arcium join-cluster true \
+      --keypair-path "$NODE_KP" \
+      --node-offset "$OFFSET" \
+      --cluster-offset "$cluster_offset" \
+      --rpc-url "$RPC_HTTP"
+  fi
+  CLUSTER_OFFSET="$cluster_offset"; save_env
+  echo -e "\n$(tr press_enter)"; read -r
 }
 propose_join_cluster() {
-  clear; display_logo; hr; echo -e "${clrBold}${clrMag}$(tr propose_join_lbl)${clrReset}\n"; hr
-  local cur_cluster="${CLUSTER_OFFSET:-}" ans; read -rp "$(tr ask_cluster_offset) ${cur_cluster:+[$cur_cluster]} " ans
-  local cluster_offset="${ans:-$cur_cluster}"; [[ -z "$cluster_offset" ]] && { cluster_offset="10102025"; info "CLUSTER OFFSET не указан — использую по умолчанию: $cluster_offset"; }
-  if !_get_offset_or_prompt; then echo -e "\n$(tr press_enter)"; read -r; return; fi
-  [[ -f "$NODE_KP" ]] || { err "Ключ не найден: $NODE_KP"; echo -e "\n$(tr press_enter)"; read -r; return; }
+  clear; display_logo; hr
+  echo -e "${clrBold}${clrMag}$(tr propose_join_lbl)${clrReset}\n"; hr
+  local cur_cluster="${CLUSTER_OFFSET:-}" ans
+  read -rp "$(tr ask_cluster_offset) ${cur_cluster:+[$cur_cluster]} " ans
+  local cluster_offset="${ans:-$cur_cluster}"
+  [[ -z "$cluster_offset" ]] && { cluster_offset="10102025"; info "CLUSTER OFFSET не указан — использую по умолчанию: $cluster_offset"; }
+  if ! _get_offset_or_prompt; then
+    echo -e "\n$(tr press_enter)"; read -r; return
+  fi
+  if [[ ! -f "$NODE_KP" ]]; then
+    err "Ключ не найден: $NODE_KP"
+    echo -e "\n$(tr press_enter)"; read -r; return
+  fi
   info "Proposing node_offset=$OFFSET to cluster_offset=$cluster_offset"
   local key_dir; key_dir="$(dirname "$NODE_KP")"
-  if [[ -d "$key_dir" ]]; then ( cd "$key_dir" && arcium propose-join-cluster --keypair-path "$NODE_KP" --node-offset "$OFFSET" --cluster-offset "$cluster_offset" --rpc-url "$RPC_HTTP" ) && ok "Proposal sent"; cd "$HOME" || true
-  else arcium propose-join-cluster --keypair-path "$NODE_KP" --node-offset "$OFFSET" --cluster-offset "$cluster_offset" --rpc-url "$RPC_HTTP" && ok "Proposal sent"; fi
-  CLUSTER_OFFSET="$cluster_offset"; save_env; echo -e "\n$(tr press_enter)"; read -r
+  if [[ -d "$key_dir" ]]; then
+    ( cd "$key_dir" && \
+      arcium propose-join-cluster \
+        --keypair-path "$NODE_KP" \
+        --node-offset "$OFFSET" \
+        --cluster-offset "$cluster_offset" \
+        --rpc-url "$RPC_HTTP" ) && ok "Proposal sent"
+    cd "$HOME" || true
+  else
+    arcium propose-join-cluster \
+      --keypair-path "$NODE_KP" \
+      --node-offset "$OFFSET" \
+      --cluster-offset "$cluster_offset" \
+      --rpc-url "$RPC_HTTP" && ok "Proposal sent"
+  fi
+  CLUSTER_OFFSET="$cluster_offset"; save_env
+  echo -e "\n$(tr press_enter)"; read -r
 }
 check_membership_single() {
   ensure_offsets; sanitize_offset
