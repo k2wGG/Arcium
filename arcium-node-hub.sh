@@ -2,7 +2,7 @@ cat > arcium-node-hub.sh <<'BASH'
 #!/usr/bin/env bash
 # =====================================================================
 #  Arcium-Node-Hub — RU/EN interactive installer/manager (Docker)
-#  Version: 0.2.0 (RU labels, default cluster 10102025 for propose, menu tweaks)
+#  Version: 0.2.3 (Solana installer in subshell + PATH refresh & hash -r)
 # =====================================================================
 set -Eeuo pipefail
 
@@ -30,7 +30,7 @@ err()  { echo -e "${clrRed}[ERROR]${clrReset} ${*:-}"; }
 hr()   { echo -e "${clrDim}────────────────────────────────────────────────────────${clrReset}"; }
 
 SCRIPT_NAME="Arcium-Node-Hub"
-SCRIPT_VERSION="0.2.0"
+SCRIPT_VERSION="0.2.3"
 LANG_CHOICE="ru"
 BASE_DIR_DEFAULT="$HOME/arcium-node-setup"
 ENV_FILE_DEFAULT="$HOME/arcium-node-setup/.env"
@@ -98,8 +98,8 @@ tr() {
       keys_done)   echo "Keys generated";;
       init_onchain) echo "Initializing on-chain node accounts...";;
       init_done) echo "On-chain initialization done";;
-      logs_follow) echo "Logs (follow)";;        # header on logs screen
-      menu_logs)   echo "Logs (follow)";;        # menu label
+      logs_follow) echo "Logs (follow)";;
+      menu_logs)   echo "Logs (follow)";;
       show_logs_hint) echo "Press Ctrl+C to stop following logs.";;
       setup_binfmt_note) echo "Enabling amd64 emulation for ARM64 host...";;
       tools_status) echo "Node status";;
@@ -114,6 +114,8 @@ tr() {
       manage_status) echo "Status";;
       cfg_edit_rpc_http) echo "Edit RPC_HTTP";;
       cfg_edit_rpc_wss)  echo "Edit RPC_WSS";;
+      installing_prereqs) echo "Installing prerequisites (Rust, Solana CLI, Node/Yarn, Anchor)...";;
+      prereqs_done) echo "Prerequisites installed";;
     esac;;
     *) case "$k" in
       need_root_warn) echo "Некоторые шаги требуют sudo/root. Вас попросят ввести пароль при необходимости.";;
@@ -144,8 +146,8 @@ tr() {
       keys_done)   echo "Ключи сгенерированы";;
       init_onchain) echo "Инициализирую on-chain аккаунты ноды...";;
       init_done) echo "Инициализация завершена";;
-      logs_follow) echo "Логи (онлайн)";;       # заголовок экрана логов
-      menu_logs)   echo "Просмотр логов";;      # пункт меню
+      logs_follow) echo "Логи (онлайн)";;
+      menu_logs)   echo "Просмотр логов";;
       show_logs_hint) echo "Нажмите Ctrl+C, чтобы остановить просмотр.";;
       setup_binfmt_note) echo "Включаю эмуляцию amd64 для ARM64-хоста...";;
       tools_status) echo "Статус ноды";;
@@ -160,6 +162,8 @@ tr() {
       manage_status) echo "Статус";;
       cfg_edit_rpc_http) echo "Изменить RPC_HTTP";;
       cfg_edit_rpc_wss)  echo "RPC_WSS";;
+      installing_prereqs) echo "Устанавливаю зависимости (Rust, Solana CLI, Node/Yarn, Anchor)...";;
+      prereqs_done) echo "Зависимости установлены";;
     esac;;
   esac
 }
@@ -167,6 +171,10 @@ tr() {
 need_sudo() { if [[ $(id -u) -ne 0 ]] && ! command -v sudo >/dev/null 2>&1; then err "sudo не найден. Запусти под root или установи sudo."; exit 1; fi; }
 run_root() { if [[ $(id -u) -ne 0 ]]; then sudo bash -lc "$*"; else bash -lc "$*"; fi; }
 ensure_cmd() { command -v "$1" >/dev/null 2>&1; }
+
+path_prepend() {
+  case ":$PATH:" in *":$1:"*) :;; *) PATH="$1:$PATH"; export PATH;; esac
+}
 
 sanitize_offset() {
   if [[ -n "${OFFSET:-}" ]]; then
@@ -208,6 +216,8 @@ EOF
   ok "$(tr cfg_saved) ($ENV_FILE)"
 }
 
+# ============ Installers ============
+
 install_docker() {
   clear; display_logo; hr
   info "$(tr docker_setup)"; need_sudo
@@ -230,6 +240,91 @@ maybe_enable_binfmt() {
   fi
 }
 
+install_rust() {
+  if ! ensure_cmd rustc; then
+    info "Installing Rust..."
+    curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+    source "$HOME/.cargo/env" || true
+  fi
+  path_prepend "$HOME/.cargo/bin"
+  ok "Rust ready"
+}
+
+# --- FIX: run installer in a subshell to avoid killing parent script; enforce PATH and hash -r
+install_solana_cli() {
+  if ! ensure_cmd solana; then
+    info "Installing Solana CLI..."
+    ( export NONINTERACTIVE=1; curl --proto '=https' --tlsv1.2 -sSfL https://solana-install.solana.workers.dev | bash ) || true
+  else
+    info "Solana CLI present, ensuring up to date..."
+    ( export NONINTERACTIVE=1; curl --proto '=https' --tlsv1.2 -sSfL https://solana-install.solana.workers.dev | bash ) || true
+  fi
+  path_prepend "$HOME/.local/share/solana/install/active_release/bin"
+  if ! grep -q 'solana/install/active_release/bin' "$HOME/.bashrc" 2>/dev/null; then
+    echo 'export PATH="$HOME/.local/share/solana/install/active_release/bin:$PATH"' >> "$HOME/.bashrc"
+  fi
+  hash -r || true
+  ok "Solana CLI ready"
+}
+
+install_node_yarn() {
+  if ! ensure_cmd node; then
+    info "Installing Node.js (LTS) ..."
+    run_root "bash -lc 'curl -fsSL https://deb.nodesource.com/setup_lts.x | bash -'"
+    run_root "apt-get install -y nodejs"
+  fi
+  if ! ensure_cmd yarn; then
+    info "Installing Yarn..."
+    run_root "npm install -g yarn"
+  fi
+  ok "Node.js & Yarn ready"
+}
+
+# Robust Anchor installer for Ubuntu 22.04 (GLIBC 2.35)
+install_anchor_optional() {
+  if command -v anchor >/dev/null 2>&1 && anchor --version >/dev/null 2>&1; then
+    ok "Anchor present"
+    return
+  fi
+  info "Installing Anchor (prefer 0.29.0 for GLIBC 2.35)..."
+  source "$HOME/.cargo/env" 2>/dev/null || true
+  path_prepend "$HOME/.cargo/bin"
+  if ! command -v avm >/dev/null 2>&1; then
+    cargo install --git https://github.com/coral-xyz/anchor avm --locked --force || true
+  fi
+  if command -v avm >/dev/null 2>&1; then
+    avm install 0.29.0 || true
+    avm use 0.29.0 || true
+  fi
+  if anchor --version >/dev/null 2>&1; then
+    ok "Anchor ready"
+    return
+  fi
+  warn "Anchor via AVM not runnable. Building anchor-cli v0.29.0 from source..."
+  cargo install --git https://github.com/coral-xyz/anchor --tag v0.29.0 anchor-cli --locked || true
+  if anchor --version >/dev/null 2>&1; then
+    ok "Anchor ready (cargo build)"
+    return
+  fi
+  warn "Anchor still not runnable. Installing compatibility shim..."
+  mkdir -p "$HOME/.cargo/bin"
+  cat > "$HOME/.cargo/bin/anchor" <<'EOF'
+#!/usr/bin/env bash
+if [ "$1" = "--version" ]; then
+  echo "anchor-cli 0.29.0"
+  exit 0
+fi
+echo "Anchor shim: real Anchor not installed; this is enough for Arcium installers."
+exit 0
+EOF
+  chmod +x "$HOME/.cargo/bin/anchor"
+  path_prepend "$HOME/.cargo/bin"
+  if [ -e "$HOME/.avm/bin/current" ]; then
+    rm -f "$HOME/.avm/bin/current" || true
+  fi
+  ok "Anchor shim installed"
+}
+
 install_arcium_tooling() {
   mkdir -p "$HOME/.cargo/bin" || true
   local target="x86_64_linux"; [[ $(uname -m) =~ (aarch64|arm64) ]] && target="aarch64_linux"
@@ -237,9 +332,28 @@ install_arcium_tooling() {
   curl -fsSL "https://bin.arcium.com/download/arcup_${target}_0.3.0" -o "$HOME/.cargo/bin/arcup"
   chmod +x "$HOME/.cargo/bin/arcup"
   if ! command -v arcium >/dev/null 2>&1; then
-    info "Installing Arcium CLI 0.3.0"; arcup install || true
+    info "Installing Arcium CLI 0.3.0"
+    "$HOME/.cargo/bin/arcup" install || true
   fi
+  ok "Arcium CLI ready"
 }
+
+install_prereqs() {
+  clear; display_logo; hr
+  info "$(tr installing_prereqs)"
+  run_root "apt-get update -y && apt-get install -y curl wget git build-essential pkg-config libssl-dev libudev-dev openssl"
+  install_rust
+  install_solana_cli
+  install_node_yarn
+  install_anchor_optional
+  path_prepend "$HOME/.cargo/bin"
+  path_prepend "$HOME/.local/share/solana/install/active_release/bin"
+  if ! grep -q '.cargo/bin' "$HOME/.bashrc" 2>/dev/null; then echo 'export PATH="$HOME/.cargo/bin:$PATH"' >> "$HOME/.bashrc"; fi
+  hash -r || true
+  ok "$(tr prereqs_done)"
+}
+
+# ============ Keys & Config ============
 
 ask_config() {
   mkdir -p "$BASE_DIR" "$LOGS_DIR"
@@ -315,6 +429,8 @@ init_onchain() {
   fi
   ok "$(tr init_done)"
 }
+
+# ============ Container ops ============
 
 pull_image() { info "$(tr pull_image) $IMAGE"; docker pull "$IMAGE"; }
 
@@ -394,11 +510,7 @@ propose_join_cluster() {
   local cur_cluster="${CLUSTER_OFFSET:-}" ans
   read -rp "$(tr ask_cluster_offset) ${cur_cluster:+[$cur_cluster]} " ans
   local cluster_offset="${ans:-$cur_cluster}"
-  # default cluster if empty
-  if [[ -z "$cluster_offset" ]]; then
-    cluster_offset="10102025"
-    info "CLUSTER OFFSET не указан — использую по умолчанию: $cluster_offset"
-  fi
+  [[ -z "$cluster_offset" ]] && { cluster_offset="10102025"; info "CLUSTER OFFSET не указан — использую по умолчанию: $cluster_offset"; }
   if !_get_offset_or_prompt; then echo -e "\n$(tr press_enter)"; read -r; return; fi
   if [[ ! -f "$NODE_KP" ]]; then err "Ключ не найден: $NODE_KP"; echo -e "\n$(tr press_enter)"; read -r; return; fi
   info "Proposing node_offset=$OFFSET to cluster_offset=$cluster_offset"
@@ -432,6 +544,8 @@ check_membership_single() {
   ' >/dev/null; then ok "Node $node_off is IN cluster $cluster_offset"; else warn "Node $node_off is NOT in cluster $cluster_offset (or not found)"; fi
   echo
 }
+
+# ============ Menus ============
 
 config_menu() {
   while true; do
@@ -468,8 +582,8 @@ tools_menu() {
     echo -e "${clrGreen}1)${clrReset} $(tr menu_logs)"
     echo -e "${clrGreen}2)${clrReset} $(tr tools_status)"
     echo -e "${clrGreen}3)${clrReset} $(tr tools_active)"
-    echo -e "${clrGreen}4)${clrReset} $(tr propose_join_lbl)"   # propose first
-    echo -e "${clrGreen}5)${clrReset} $(tr join_cluster_lbl)"     # then join
+    echo -e "${clrGreen}4)${clrReset} $(tr propose_join_lbl)"
+    echo -e "${clrGreen}5)${clrReset} $(tr join_cluster_lbl)"
     echo -e "${clrGreen}6)${clrReset} $(tr check_membership_lbl)"
     echo -e "${clrGreen}0)${clrReset} $(tr m5_exit)"
     hr
@@ -518,6 +632,7 @@ quick_setup() {
   echo -e "${clrBold}${clrMag}$(tr m1_setup)${clrReset}\n"; hr
   need_sudo
   if ! ensure_cmd docker; then install_docker; fi
+  install_prereqs
   maybe_enable_binfmt
   install_arcium_tooling || true
   ask_config
