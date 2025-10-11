@@ -51,7 +51,7 @@ CLUSTER_OFFSET=${CLUSTER_OFFSET:-}
 [[ -f "$ENV_FILE" ]] && source "$ENV_FILE" || true
 
 CFG_FILE="/root/arcium-node-setup/node-config.toml"
-NODE_KP="/root/arcium-node-setup/.env"
+NODE_KP="$BASE_DIR/node-keypair.json"
 CALLBACK_KP="$BASE_DIR/callback-kp.json"
 IDENTITY_PEM="$BASE_DIR/identity.pem"
 LOGS_DIR="$BASE_DIR/arx-node-logs"
@@ -387,6 +387,32 @@ try_airdrop() {
   show_keys_balances
 }
 
+# Обновить RPC в существующем node-config.toml
+update_rpc_endpoints() {
+  local cfg="${CFG_FILE:-$BASE_DIR/node-config.toml}"
+  local envf="${ENV_FILE:-$BASE_DIR/.env}"
+
+  # Подтянуть RPC_* из .env, если есть
+  [[ -f "$envf" ]] && source "$envf" || true
+
+  # Если переменные пустые — просто выходим, ничего не ломаем
+  if [[ -z "${RPC_HTTP:-}" || -z "${RPC_WSS:-}" ]]; then
+    warn "RPC_HTTP/RPC_WSS пустые — пропускаю обновление $cfg"
+    return 1
+  fi
+  if [[ ! -f "$cfg" ]]; then
+    warn "Файл конфигурации не найден: $cfg"
+    return 1
+  fi
+
+  sed -i -E \
+    -e 's|^([[:space:]]*endpoint_rpc[[:space:]]*=[[:space:]]*").*(")|\1'"$RPC_HTTP"'\2|g' \
+    -e 's|^([[:space:]]*endpoint_wss[[:space:]]*=[[:space:]]*").*(")|\1'"$RPC_WSS"'\2|g' \
+    "$cfg"
+
+  ok "RPC обновлены в $cfg"
+}
+
 # -------------------- On-chain init & container --------------------
 init_onchain() {
   clear; display_logo; hr; info "$(tr init_onchain)"
@@ -629,10 +655,27 @@ config_menu() {
     hr
     read -rp "> " c
     case "${c:-}" in
-      1) read -rp "RPC_HTTP: " RPC_HTTP ;;
-      2) read -rp "RPC_WSS: " RPC_WSS ;;
-      0) return ;;
-      *) ;;
+      1)
+        read -rp "RPC_HTTP: " RPC_HTTP
+        save_env
+        update_rpc_endpoints
+        echo "→ RPC_HTTP обновлён в $CFG_FILE."
+        read -rp "Перезапустить контейнер сейчас? (y/N): " z
+        [[ "$z" =~ ^[Yy]$ ]] && restart_container
+        ;;
+      2)
+        read -rp "RPC_WSS: " RPC_WSS
+        save_env
+        update_rpc_endpoints
+        echo "→ RPC_WSS обновлён в $CFG_FILE."
+        read -rp "Перезапустить контейнер сейчас? (y/N): " z
+        [[ "$z" =~ ^[Yy]$ ]] && restart_container
+        ;;
+      0)
+        return
+        ;;
+      *)
+        ;;
     esac
     echo -e "\n$(tr press_enter)"; read -r
   done
