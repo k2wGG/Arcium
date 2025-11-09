@@ -62,7 +62,6 @@ SEED_NODE="$BASE_DIR/node-keypair.seed.txt"
 SEED_CALLBACK="$BASE_DIR/callback-kp.seed.txt"
 PUB_NODE_FILE="$BASE_DIR/node-pubkey.txt"
 PUB_CALLBACK_FILE="$BASE_DIR/callback-pubkey.txt"
-BACKUP_DIR="$BASE_DIR/backup-030"
 
 # ---------- i18n ----------
 choose_language() {
@@ -130,15 +129,6 @@ tr() {
       need_funds) echo "Accounts have 0 SOL. Fund them on Devnet and retry.";;
       ask_target_node_offset) echo "Enter the NODE OFFSET to invite (empty = use your own): ";;
       seeds_title) echo "Seed phrases (mnemonic)";;
-      upgrade_title) echo "Upgrade 0.3.0 → 0.4.0";;
-      upgrade_start) echo "Upgrading toolchain and Arcium stack to v0.4.x";;
-      upgrade_rust)  echo "Setting Rust toolchain to 1.89.0";;
-      upgrade_solana) echo "Updating Solana CLI (target 2.3.0)";;
-      upgrade_anchor) echo "Updating Anchor to 0.32.1 (via avm)";;
-      upgrade_arcup) echo "Updating Arcium via arcup";;
-      upgrade_detect_img) echo "Detecting Docker image for v0.4.x";;
-      upgrade_backup) echo "Backup .env and config";;
-      upgrade_done) echo "Upgrade complete";;
     esac;;
     *) case "$k" in
       need_root_warn) echo "Некоторые шаги требуют sudo/root. Вас попросят ввести пароль при необходимости.";;
@@ -193,15 +183,6 @@ tr() {
       need_funds) echo "На аккаунтах 0 SOL. Пополните их на Devnet и повторите.";;
       ask_target_node_offset) echo "Введи OFFSET ноды, которую приглашаешь (пусто — свой): ";;
       seeds_title) echo "Сид-фразы (mnemonic)";;
-      upgrade_title) echo "Обновление 0.3.0 → 0.4.0";;
-      upgrade_start) echo "Обновляю тулчейн и стек Arcium до v0.4.x";;
-      upgrade_rust)  echo "Переключаю Rust на 1.89.0";;
-      upgrade_solana) echo "Обновляю Solana CLI (цель 2.3.0)";;
-      upgrade_anchor) echo "Обновляю Anchor до 0.32.1 (через avm)";;
-      upgrade_arcup) echo "Обновляю Arcium через arcup";;
-      upgrade_detect_img) echo "Определяю Docker-образ для v0.4.x";;
-      upgrade_backup) echo "Делаю бэкап .env и конфигурации";;
-      upgrade_done) echo "Обновление завершено";;
     esac;;
   esac
 }
@@ -220,43 +201,6 @@ sanitize_offset() {
   if [[ -n "${OFFSET:-}" ]]; then
     local clean; clean="$(printf '%s\n' "$OFFSET" | sed -n 's/[^0-9]*\([0-9][0-9]*\).*/\1/p')"
     if [[ -n "$clean" && "$clean" != "$OFFSET" ]]; then OFFSET="$clean"; save_env 2>/dev/null || true; fi
-  fi
-}
-
-ip_is_valid_v4() {
-  local ip="${1:-}"; [[ -z "$ip" ]] && return 1
-  echo "$ip" | awk -F. 'NF==4{for(i=1;i<=4;i++){if($i!~/^[0-9]+$/ || $i<0 || $i>255)exit 1}}' >/dev/null
-}
-
-strip_html_to_ip() {
-  # если вместо IP пришла HTML-страница (Cloudflare и т.п.)
-  sed -nE 's/.*([0-9]{1,3}(\.[0-9]{1,3}){3}).*/\1/p'
-}
-
-detect_public_ip() {
-  # несколько источников подряд; выжимаем чистый IPv4
-  local c
-  for c in \
-    "curl -4s https://api.ipify.org" \
-    "curl -4s https://ipecho.net/plain" \
-    "curl -4s https://ifconfig.me" \
-    "curl -4s https://ipv4.icanhazip.com" ; do
-      ip="$({ eval "$c"; } 2>/dev/null | tr -d '\r\n[:space:]' | strip_html_to_ip | head -1)"
-      if ip_is_valid_v4 "$ip"; then echo "$ip"; return 0; fi
-  done
-  return 1
-}
-
-ensure_public_ip() {
-  # гарантируем корректный PUBLIC_IP в окружении и .env
-  if ! ip_is_valid_v4 "${PUBLIC_IP:-}"; then
-    local got; got="$(detect_public_ip || true)"
-    if ip_is_valid_v4 "$got"; then
-      PUBLIC_IP="$got"; save_env 2>/dev/null || true
-      ok "PUBLIC_IP установлен: $PUBLIC_IP"
-    else
-      warn "Не удалось автоматически определить PUBLIC_IP. Его можно задать вручную в Конфигурации."
-    fi
   fi
 }
 
@@ -485,12 +429,8 @@ ask_config() {
   read -rp "$(tr ask_rpc_http) [$RPC_HTTP] " ans; RPC_HTTP=${ans:-$RPC_HTTP}
   read -rp "$(tr ask_rpc_wss)  [$RPC_WSS] " ans; RPC_WSS=${ans:-$RPC_WSS}
   read -rp "$(tr ask_offset) " OFFSET; sanitize_offset
-  ensure_public_ip
-  read -rp "$(tr ask_ip) [${PUBLIC_IP:-auto}] " ans; PUBLIC_IP=${ans:-$PUBLIC_IP}
-  if ! ip_is_valid_v4 "${PUBLIC_IP:-}"; then
-    warn "Введён некорректный IP. Оставляю пустым — можно будет поправить в Конфигурации."
-    PUBLIC_IP=""
-  fi  
+  if [[ -z "${PUBLIC_IP:-}" ]]; then PUBLIC_IP=$(curl -4 -s https://ipecho.net/plain || true); fi
+  read -rp "$(tr ask_ip) [$PUBLIC_IP] " ans; PUBLIC_IP=${ans:-$PUBLIC_IP}
   save_env
 }
 
@@ -677,7 +617,6 @@ show_seed_phrases() {
 init_onchain() {
   clear; display_logo; hr; info "$(tr init_onchain)"
   solana config set --url "$RPC_HTTP" >/dev/null 2>&1 || true
-  ensure_public_ip
 
   # Require funds
   local node_pk cb_pk nb cb
@@ -694,12 +633,6 @@ init_onchain() {
   done
 
   local key_dir; key_dir="$(dirname "$NODE_KP")"
-  # если оператор уже существует — пропускаем его инициализацию, только Node PDA
-local need_node_init=1
-if arcium arx-info "$OFFSET" --rpc-url "$RPC_HTTP" >/dev/null 2>&1; then
-  need_node_init=0
-fi
-if [[ "$need_node_init" -eq 1 ]]; then
   if [[ -d "$key_dir" ]]; then
     ( cd "$key_dir" && arcium init-arx-accs \
         --keypair-path "$NODE_KP" \
@@ -707,8 +640,7 @@ if [[ "$need_node_init" -eq 1 ]]; then
         --peer-keypair-path "$IDENTITY_PEM" \
         --node-offset "$OFFSET" \
         --ip-address "$PUBLIC_IP" \
-        --rpc-url "$RPC_HTTP" \
-        --skip-steps init-operator )
+        --rpc-url "$RPC_HTTP" )
     cd "$HOME" || true
   else
     arcium init-arx-accs \
@@ -717,31 +649,18 @@ if [[ "$need_node_init" -eq 1 ]]; then
       --peer-keypair-path "$IDENTITY_PEM" \
       --node-offset "$OFFSET" \
       --ip-address "$PUBLIC_IP" \
-      --rpc-url "$RPC_HTTP" \
-      --skip-steps init-operator
+      --rpc-url "$RPC_HTTP"
   fi
-fi
   ok "$(tr init_done)"
 }
 
 pull_image() { info "$(tr pull_image) $IMAGE"; docker pull "$IMAGE"; }
 
-# ==================== Запуск контейнера (обновлённый) ====================
 start_container() {
-  mkdir -p "$LOGS_DIR"
-  # Подхватим .env на всякий
-  [[ -f "$ENV_FILE" ]] && set -a && . "$ENV_FILE" && set +a
-
-  # Защита от пустых переменных
-  : "${CONTAINER:=arx-node}"
-  : "${IMAGE:=arcium/arx-node:v0.4.0}"
-
-  # Чистый старт
-  docker rm -f "$CONTAINER" >/dev/null 2>&1 || true
+  mkdir -p "$LOGS_DIR"; docker rm -f "$CONTAINER" >/dev/null 2>&1 || true
   info "$(tr start_container)"
   docker run -d \
     --name "$CONTAINER" \
-    --restart unless-stopped \
     -e NODE_IDENTITY_FILE=/usr/arx-node/node-keys/node_identity.pem \
     -e NODE_KEYPAIR_FILE=/usr/arx-node/node-keys/node_keypair.json \
     -e OPERATOR_KEYPAIR_FILE=/usr/arx-node/node-keys/operator_keypair.json \
@@ -757,7 +676,6 @@ start_container() {
     "$IMAGE"
   ok "$(tr container_started)"
 }
-
 stop_container()  { docker stop "$CONTAINER" && ok "$(tr container_stopped)" || true; }
 remove_container(){ docker rm -f "$CONTAINER" && ok "$(tr container_removed)" || true; }
 restart_container(){ docker restart "$CONTAINER" && ok "$(tr container_restarted)" || true; }
@@ -895,120 +813,6 @@ check_membership_single() {
   ' >/dev/null; then ok "Node $node_off is IN cluster $cluster_offset"; else warn "Node $node_off is NOT in cluster $cluster_offset (or not found)"; fi
   echo
 }
-
-# ==================== Upgrade 0.3.0 → 0.4.0 ====================
-upgrade_030_to_040() {
-  clear; display_logo; hr
-  echo -e "${clrBold}${clrMag}$(tr upgrade_title)${clrReset}\n"; hr
-  info "$(tr upgrade_start)"
-
-  # 0) Подхватим .env, чтобы CONTAINER/IMAGE/RPC_*/OFFSET были в окружении
-  [[ -f "$ENV_FILE" ]] && set -a && . "$ENV_FILE" && set +a
-
-  # 1) Бэкап конфигов
-  info "$(tr upgrade_backup)"
-  mkdir -p "$BACKUP_DIR"
-  ts="$(date +%Y%m%d-%H%M%S)"
-  [[ -f "$ENV_FILE" ]] && cp -a "$ENV_FILE" "$BACKUP_DIR/.env.$ts.bak" || true
-  [[ -f "$CFG_FILE" ]] && cp -a "$CFG_FILE" "$BACKUP_DIR/node-config.toml.$ts.bak" || true
-
-  # 2) Остановим/удалим старый контейнер (на случай, если запущен)
-  docker rm -f "${CONTAINER:-arx-node}" >/dev/null 2>&1 || true
-
-  # 3) Rust 1.89.0
-  info "$(tr upgrade_rust)"
-  if command -v rustup >/dev/null 2>&1; then
-    rustup toolchain install 1.89.0 -q || true
-    rustup default 1.89.0 || true
-  else
-    install_rust
-    rustup toolchain install 1.89.0 -q || true
-    rustup default 1.89.0 || true
-  fi
-
-  # 4) Solana CLI (целимся в 2.3.0 через официальный инсталлер)
-  info "$(tr upgrade_solana)"
-  ( export NONINTERACTIVE=1; curl -sSfL https://solana-install.solana.workers.dev | bash ) || true
-  path_prepend "$HOME/.local/share/solana/install/active_release/bin"
-  sol_ver="$(solana --version 2>/dev/null || echo 'solana not installed')"
-  info "Solana detected: $sol_ver"
-
-  # 5) Anchor 0.32.1 (через avm; при неудаче — шима)
-  info "$(tr upgrade_anchor)"
-  source "$HOME/.cargo/env" 2>/dev/null || true
-  path_prepend "$HOME/.cargo/bin"
-  if ! command -v avm >/dev/null 2>&1; then
-    cargo install --git https://github.com/coral-xyz/anchor avm --locked --force || true
-  fi
-  if command -v avm >/dev/null 2>&1; then
-    avm install 0.32.1 || true
-    avm use 0.32.1 || true
-  fi
-  if ! anchor --version >/dev/null 2>&1; then
-    warn "Anchor CLI не запустился — ставлю шиму 0.32.1"
-    mkdir -p "$HOME/.cargo/bin"
-    cat > "$HOME/.cargo/bin/anchor" <<'EOANCH'
-#!/usr/bin/env bash
-if [ "$1" = "--version" ]; then echo "anchor-cli 0.32.1"; exit 0; fi
-echo "Anchor shim: real Anchor not installed; this is enough for Arcium installers."; exit 0
-EOANCH
-    chmod +x "$HOME/.cargo/bin/anchor"
-  fi
-
-  # 6) Arcium через arcup (подтянет согласованные версии)
-  info "$(tr upgrade_arcup)"
-  if ! command -v arcup >/dev/null 2>&1; then
-    install_arcium_cli
-  fi
-  if command -v arcup >/dev/null 2>&1; then
-    "$HOME/.cargo/bin/arcup" install || arcup install || true
-  fi
-  path_prepend "$HOME/.arcium/bin"
-  hash -r || true
-  arc_ver="$(arcium --version 2>/dev/null || echo 'arcium not installed')"
-  info "Arcium detected: $arc_ver"
-
-  # 7) Образ 0.4.x и сохранение .env
-  info "$(tr upgrade_detect_img)"
-  IMAGE="arcium/arx-node:v0.4.0"
-  ensure_public_ip
-  save_env
-
-  # 8) Предполётная проверка конфигов/ключей
-  for f in "$CFG_FILE" "$NODE_KP" "$CALLBACK_KP" "$IDENTITY_PEM"; do
-    [[ -s "$f" ]] || { err "Отсутствует или пуст: $f"; echo -e "\n$(tr press_enter)"; read -r; return; }
-  done
-
-  # 9) Если аккаунт ноды на чейне ещё не создан — создадим без оператора
-  if ! arcium arx-info "$OFFSET" --rpc-url "$RPC_HTTP" >/dev/null 2>&1; then
-    info "Инициализирую on-chain аккаунт ноды (оператора не трогаю)..."
-    ( cd "$(dirname "$NODE_KP")" && arcium init-arx-accs \
-        --keypair-path "$NODE_KP" \
-        --callback-keypair-path "$CALLBACK_KP" \
-        --peer-keypair-path "$IDENTITY_PEM" \
-        --node-offset "$OFFSET" \
-        --ip-address "${PUBLIC_IP:-0.0.0.0}" \
-        --rpc-url "$RPC_HTTP" \
-        --skip-steps init-operator ) || true
-  fi
-
-  # 10) Тянем образ и стартуем контейнер (с автоперезапуском)
-  pull_image
-  start_container
-
-  # 11) Диагностика
-  status_table
-  ensure_offsets || true
-  if [[ -n "${OFFSET:-}" ]]; then
-    echo
-    arcium arx-info "$OFFSET" --rpc-url "$RPC_HTTP" || true
-    arcium arx-active "$OFFSET" --rpc-url "$RPC_HTTP" || true
-  fi
-
-  ok "$(tr upgrade_done)"
-  echo -e "\n$(tr press_enter)"; read -r
-}
-
 
 # ==================== Menus ====================
 config_menu() {
@@ -1162,7 +966,6 @@ main_menu() {
     echo -e "${clrGreen}4)${clrReset} $(tr m3_config)"
     echo -e "${clrGreen}5)${clrReset} $(tr m4_tools)"
     echo -e "${clrGreen}6)${clrReset} $(tr m5_exit)"
-    echo -e "${clrGreen}7)${clrReset} $(tr upgrade_title)"
     hr
     read -rp "> " choice
     case "${choice:-}" in
@@ -1172,7 +975,6 @@ main_menu() {
       4) config_menu ;;
       5) tools_menu ;;
       6) exit 0 ;;
-      7) upgrade_030_to_040 ;;
       *) ;;
     esac
     echo -e "\n$(tr press_enter)"; read -r
