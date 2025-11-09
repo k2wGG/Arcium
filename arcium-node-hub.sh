@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # =====================================================================
 #  Arcium-Node-Hub — RU/EN interactive installer/manager (Docker)
-#  Version: 0.3.0 (server prep split, seed save/show, RPC editor, robust arcium install)
+#  Version: 0.4.0 (server prep split, seed save/show, RPC editor, robust arcium install)
 # =====================================================================
 set -Eeuo pipefail
 
