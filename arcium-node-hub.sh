@@ -818,7 +818,7 @@ migration_030_to_040() {
   clear; display_logo; hr
   echo -e "${clrBold}${clrMag}Миграция 0.3.0 → 0.4.0${clrReset}\n"; hr
 
-  # 1) Остановить и удалить старый контейнер
+  # 1) Остановить/удалить старый контейнер
   info "Отключаю старый контейнер arx-node..."
   docker rm -f arx-node 2>/dev/null || true
 
@@ -827,18 +827,18 @@ migration_030_to_040() {
   info "Тяну образ ${IMG}..."
   docker pull "${IMG}"
 
-  # 3) Добавить .arcium/bin в PATH в .bashrc и текущую сессию
-  info "Обновляю PATH для arcium..."
-  sed -i '1iexport PATH="$HOME/.arcium/bin:$PATH"' "$HOME/.bashrc"
-  export PATH="$HOME/.arcium/bin:$PATH"
-  hash -r
+  # 3) Подготовить PATH в ~/.bashrc (на будущее), текущую сессию пока не трогаем
+  info "Готовлю PATH для arcium (для будущих сессий)…"
+  if ! grep -q 'export PATH="$HOME/.arcium/bin:$PATH"' "$HOME/.bashrc" 2>/dev/null; then
+    sed -i '1iexport PATH="$HOME/.arcium/bin:$PATH"' "$HOME/.bashrc"
+  fi
 
-  # 4) Переименовать старый бинарь arcium, если он был поставлен через cargo
-  mv /root/.cargo/bin/arcium /root/.cargo/bin/arcium.old 2>/dev/null || true
+  # 4) Переименовать старый cargo-бинарь (если был)
+  mv "$HOME/.cargo/bin/arcium" "$HOME/.cargo/bin/arcium.old" 2>/dev/null || true
 
-  # 5) Установить arcium через arcup
+  # 5) Установить через arcup (при необходимости — скачать arcup)
   if [[ ! -x "$HOME/.cargo/bin/arcup" ]]; then
-    warn "arcup не найден. Попробую скачать быстрый бинарь..."
+    warn "arcup не найден. Скачиваю…"
     mkdir -p "$HOME/.cargo/bin"
     local target="x86_64_linux"
     [[ $(uname -m) =~ (aarch64|arm64) ]] && target="aarch64_linux"
@@ -846,24 +846,56 @@ migration_030_to_040() {
     curl -fsSL "https://bin.arcium.network/download/arcup_${target}_0.4.0" -o "$HOME/.cargo/bin/arcup"
     chmod +x "$HOME/.cargo/bin/arcup"
   fi
-
-  info "Устанавливаю Arcium CLI через arcup..."
+  info "Устанавливаю Arcium CLI через arcup…"
   "$HOME/.cargo/bin/arcup" install
 
-  # 6) Освежить PATH и проверить наличие arcium
-  export PATH="$HOME/.arcium/bin:$PATH"
-  hash -r
-  which arcium >/dev/null || echo "нет arcium в PATH"
-  arcium --version || true
+  # === Нормализация бинаря после arcup install ===
+  mkdir -p "$HOME/.arcium/bin"
 
-  # 7) Проверить версию
-  if arcium --version 2>/dev/null | grep -qE '^arcium-cli 0\.4\.0$'; then
-    ok "Версия подтверждена: arcium-cli 0.4.0"
-  else
-    warn "Ожидалась версия arcium-cli 0.4.0. Проверь установку."
+  # 1) если есть arcium-cli — линкуем на arcium
+  if [[ -x "$HOME/.arcium/bin/arcium-cli" && ! -e "$HOME/.arcium/bin/arcium" ]]; then
+    ln -sf "$HOME/.arcium/bin/arcium-cli" "$HOME/.arcium/bin/arcium"
   fi
 
-  # Подготовка путей
+  # 2) если arcup положил версионный бинарь в ~/.cargo/bin (например arcium-0.4.0) — линкуем
+  if [[ ! -e "$HOME/.arcium/bin/arcium" ]]; then
+    if [[ -x "$HOME/.cargo/bin/arcium-0.4.0" ]]; then
+      ln -sf "$HOME/.cargo/bin/arcium-0.4.0" "$HOME/.arcium/bin/arcium"
+      ok "Нашёл: $HOME/.cargo/bin/arcium-0.4.0 → $HOME/.arcium/bin/arcium"
+    fi
+  fi
+
+  # 3) если всё ещё нет — ищем глубже по HOME (arcium, arcium-cli, arcium-*)
+  if [[ ! -x "$HOME/.arcium/bin/arcium" ]]; then
+    FOUND="$( (command -v arcium || true; command -v arcium-cli || true; \
+      find "$HOME" -maxdepth 8 -type f -perm -111 \( -name 'arcium' -o -name 'arcium-cli' -o -name 'arcium-*' \) 2>/dev/null) \
+      | awk 'NF' | sort -u | head -n1 )"
+    if [[ -n "$FOUND" ]]; then
+      ln -sf "$FOUND" "$HOME/.arcium/bin/arcium"
+      ok "Нашёл бинарь: $FOUND → $HOME/.arcium/bin/arcium"
+    else
+      warn "Не удалось найти бинарь arcium после установки arcup."
+    fi
+  fi
+
+  # 4) добавить PATH для текущей сессии и проверить версию
+  export PATH="$HOME/.arcium/bin:$PATH"
+  hash -r
+  local ARCIUM_BIN="$HOME/.arcium/bin/arcium"
+  if [[ ! -x "$ARCIUM_BIN" ]]; then
+    warn "нет arcium в PATH и по абсолютному пути — проверь установку arcup"
+    echo -e "\n$(tr press_enter)"; read -r; return
+  fi
+
+  # 7) Ожидаем строгий вывод версии
+  if "$ARCIUM_BIN" --version 2>/dev/null | grep -qE '^arcium-cli 0\.4\.0$'; then
+    ok "Версия подтверждена: arcium-cli 0.4.0"
+  else
+    warn "Ожидалась версия arcium-cli 0.4.0. Вывод:"
+    ( "$ARCIUM_BIN" --version 2>&1 || true )
+  fi
+
+  # Пути
   local BASE="$HOME/arcium-node-setup"
   local CFG="$BASE/node-config.toml"
   local NODE_KP="$BASE/node-keypair.json"
@@ -872,7 +904,7 @@ migration_030_to_040() {
   local LOGS="$BASE/arx-node-logs"
   mkdir -p "$BASE" "$LOGS"
 
-  # 8) Инициализация on-chain аккаунтов с запросом OFFSET
+  # 8) Инициализация on-chain с запросом OFFSET (8–10 цифр)
   local OFFSET_IN=""
   while true; do
     read -rp "Введи OFFSET (8–10 цифр): " OFFSET_IN
@@ -881,8 +913,8 @@ migration_030_to_040() {
     warn "Нужны только цифры, длина 8–10."
   done
 
-  info "Инициализирую on-chain аккаунты..."
-  arcium init-arx-accs \
+  info "Инициализирую on-chain аккаунты…"
+  "$ARCIUM_BIN" init-arx-accs \
     --keypair-path "$NODE_KP" \
     --callback-keypair-path "$CALLBACK_KP" \
     --peer-keypair-path "$ID_PEM" \
@@ -890,8 +922,8 @@ migration_030_to_040() {
     --ip-address "$(curl -4 -s https://ipecho.net/plain)" \
     --rpc-url "https://api.devnet.solana.com"
 
-  # 9) Запуск контейнера 0.4.0 с restart unless-stopped
-  info "Запускаю контейнер arx-node c образа ${IMG}..."
+  # 9) Запуск контейнера 0.4.0 (restart unless-stopped)
+  info "Запускаю контейнер arx-node c образа ${IMG}…"
   docker run -d --name arx-node --restart unless-stopped \
     -e NODE_IDENTITY_FILE=/usr/arx-node/node-keys/node_identity.pem \
     -e NODE_KEYPAIR_FILE=/usr/arx-node/node-keys/node_keypair.json \
