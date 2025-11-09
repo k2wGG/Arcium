@@ -814,6 +814,104 @@ check_membership_single() {
   echo
 }
 
+migration_030_to_040() {
+  clear; display_logo; hr
+  echo -e "${clrBold}${clrMag}Миграция 0.3.0 → 0.4.0${clrReset}\n"; hr
+
+  # 1) Остановить и удалить старый контейнер
+  info "Отключаю старый контейнер arx-node..."
+  docker rm -f arx-node 2>/dev/null || true
+
+  # 2) Загрузить образ 0.4.0
+  local IMG="arcium/arx-node:v0.4.0"
+  info "Тяну образ ${IMG}..."
+  docker pull "${IMG}"
+
+  # 3) Добавить .arcium/bin в PATH в .bashrc и текущую сессию
+  info "Обновляю PATH для arcium..."
+  sed -i '1iexport PATH="$HOME/.arcium/bin:$PATH"' "$HOME/.bashrc"
+  export PATH="$HOME/.arcium/bin:$PATH"
+  hash -r
+
+  # 4) Переименовать старый бинарь arcium, если он был поставлен через cargo
+  mv /root/.cargo/bin/arcium /root/.cargo/bin/arcium.old 2>/dev/null || true
+
+  # 5) Установить arcium через arcup
+  if [[ ! -x "$HOME/.cargo/bin/arcup" ]]; then
+    warn "arcup не найден. Попробую скачать быстрый бинарь..."
+    mkdir -p "$HOME/.cargo/bin"
+    local target="x86_64_linux"
+    [[ $(uname -m) =~ (aarch64|arm64) ]] && target="aarch64_linux"
+    curl -fsSL "https://bin.arcium.com/download/arcup_${target}_0.4.0" -o "$HOME/.cargo/bin/arcup" || \
+    curl -fsSL "https://bin.arcium.network/download/arcup_${target}_0.4.0" -o "$HOME/.cargo/bin/arcup"
+    chmod +x "$HOME/.cargo/bin/arcup"
+  fi
+
+  info "Устанавливаю Arcium CLI через arcup..."
+  "$HOME/.cargo/bin/arcup" install
+
+  # 6) Освежить PATH и проверить наличие arcium
+  export PATH="$HOME/.arcium/bin:$PATH"
+  hash -r
+  which arcium >/dev/null || echo "нет arcium в PATH"
+  arcium --version || true
+
+  # 7) Проверить версию
+  if arcium --version 2>/dev/null | grep -qE '^arcium-cli 0\.4\.0$'; then
+    ok "Версия подтверждена: arcium-cli 0.4.0"
+  else
+    warn "Ожидалась версия arcium-cli 0.4.0. Проверь установку."
+  fi
+
+  # Подготовка путей
+  local BASE="$HOME/arcium-node-setup"
+  local CFG="$BASE/node-config.toml"
+  local NODE_KP="$BASE/node-keypair.json"
+  local CALLBACK_KP="$BASE/callback-kp.json"
+  local ID_PEM="$BASE/identity.pem"
+  local LOGS="$BASE/arx-node-logs"
+  mkdir -p "$BASE" "$LOGS"
+
+  # 8) Инициализация on-chain аккаунтов с запросом OFFSET
+  local OFFSET_IN=""
+  while true; do
+    read -rp "Введи OFFSET (8–10 цифр): " OFFSET_IN
+    OFFSET_IN="$(printf '%s\n' "$OFFSET_IN" | sed -n 's/[^0-9]*\([0-9]\{8,10\}\).*/\1/p')"
+    [[ -n "$OFFSET_IN" ]] && break
+    warn "Нужны только цифры, длина 8–10."
+  done
+
+  info "Инициализирую on-chain аккаунты..."
+  arcium init-arx-accs \
+    --keypair-path "$NODE_KP" \
+    --callback-keypair-path "$CALLBACK_KP" \
+    --peer-keypair-path "$ID_PEM" \
+    --node-offset "$OFFSET_IN" \
+    --ip-address "$(curl -4 -s https://ipecho.net/plain)" \
+    --rpc-url "https://api.devnet.solana.com"
+
+  # 9) Запуск контейнера 0.4.0 с restart unless-stopped
+  info "Запускаю контейнер arx-node c образа ${IMG}..."
+  docker run -d --name arx-node --restart unless-stopped \
+    -e NODE_IDENTITY_FILE=/usr/arx-node/node-keys/node_identity.pem \
+    -e NODE_KEYPAIR_FILE=/usr/arx-node/node-keys/node_keypair.json \
+    -e OPERATOR_KEYPAIR_FILE=/usr/arx-node/node-keys/operator_keypair.json \
+    -e CALLBACK_AUTHORITY_KEYPAIR_FILE=/usr/arx-node/node-keys/callback_authority_keypair.json \
+    -e NODE_CONFIG_PATH=/usr/arx-node/arx/node_config.toml \
+    -v "$CFG:/usr/arx-node/arx/node_config.toml" \
+    -v "$NODE_KP:/usr/arx-node/node-keys/node_keypair.json:ro" \
+    -v "$NODE_KP:/usr/arx-node/node-keys/operator_keypair.json:ro" \
+    -v "$CALLBACK_KP:/usr/arx-node/node-keys/callback_authority_keypair.json:ro" \
+    -v "$ID_PEM:/usr/arx-node/node-keys/node_identity.pem:ro" \
+    -v "$LOGS:/usr/arx-node/logs" \
+    -p 8080:8080 \
+    "${IMG}"
+
+  ok "Миграция завершена. Текущий статус контейнера:"
+  docker ps -a --filter "name=arx-node" --format 'table {{.Names}}\t{{.Status}}\t{{.Image}}'
+  echo -e "\n$(tr press_enter)"; read -r
+}
+
 # ==================== Menus ====================
 config_menu() {
   while true; do
@@ -959,13 +1057,21 @@ main_menu() {
   info "$(tr need_root_warn)" || true
   while true; do
     clear; display_logo; hr
+    local MIG_LABEL
+    if [[ "$LANG_CHOICE" == "en" ]]; then
+      MIG_LABEL="Migration 0.3.0 → 0.4.0"
+    else
+      MIG_LABEL="Миграция 0.3.0 → 0.4.0"
+    fi
+
     echo -e "${clrBold}${clrMag}$(tr menu_title)${clrReset} ${clrDim}(v${SCRIPT_VERSION})${clrReset}\n"
     echo -e "${clrGreen}1)${clrReset} $(tr m1_prep)"
     echo -e "${clrGreen}2)${clrReset} $(tr m2_install)"
     echo -e "${clrGreen}3)${clrReset} $(tr m2_manage)"
     echo -e "${clrGreen}4)${clrReset} $(tr m3_config)"
     echo -e "${clrGreen}5)${clrReset} $(tr m4_tools)"
-    echo -e "${clrGreen}6)${clrReset} $(tr m5_exit)"
+    echo -e "${clrGreen}6)${clrReset} ${MIG_LABEL}"
+    echo -e "${clrGreen}7)${clrReset} $(tr m5_exit)"
     hr
     read -rp "> " choice
     case "${choice:-}" in
@@ -974,11 +1080,11 @@ main_menu() {
       3) manage_menu ;;
       4) config_menu ;;
       5) tools_menu ;;
-      6) exit 0 ;;
+      6) migration_030_to_040 ;;
+      7) exit 0 ;;
       *) ;;
     esac
     echo -e "\n$(tr press_enter)"; read -r
   done
 }
 
-main_menu
