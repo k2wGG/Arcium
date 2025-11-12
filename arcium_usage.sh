@@ -77,41 +77,55 @@ echo -e "  LOGS_DIR: $(fmt_bytes "${LOGS_BYTES:-0}")"
 echo -e "  Docker image: $(fmt_bytes "${IMG_BYTES:-0}")"
 hr
 
-# -------- container quick (без ошибок с CPU форматами) --------
+# ---------- container (robust status/uptime) ----------
 CID="$(docker ps -aq --filter "name=^${CONTAINER}$" | head -n1 || true)"
 if [[ -n "$CID" ]]; then
-  STATE_LINE="$(docker inspect -f '{{.State.Status}};{{.State.Running}};{{.State.StartedAt}};{{.State.Health.Status}}' "$CID" 2>/dev/null || true)"
-  STATUS="$(echo "$STATE_LINE" | awk -F';' '{print $1}')"
-  RUNNING="$(echo "$STATE_LINE" | awk -F';' '{print $2}')"
-  STARTED_AT="$(echo "$STATE_LINE" | awk -F';' '{print $3}')"
-  HEALTH="$(echo "$STATE_LINE" | awk -F';' '{print $4}')"
+  # читаем поля по одному, с фоллбэками
+  STATUS="$(docker inspect -f '{{.State.Status}}' "$CID" 2>/dev/null || true)"
+  RUNNING="$(docker inspect -f '{{.State.Running}}' "$CID" 2>/dev/null || true)"
+  STARTED_AT="$(docker inspect -f '{{.State.StartedAt}}' "$CID" 2>/dev/null || true)"
+  HEALTH="$(docker inspect -f '{{if .State.Health}}{{.State.Health.Status}}{{end}}' "$CID" 2>/dev/null || true)"
 
-  # uptime
+  # если вдруг всё равно пусто — используем docker ps
+  if [[ -z "$STATUS" ]]; then
+    STATUS="$(docker ps -a --filter "id=$CID" --format '{{.Status}}' | awk '{print $1}' | head -n1)"
+  fi
+  if [[ -z "$RUNNING" ]]; then
+    RUNNING="$(docker ps -a --filter "id=$CID" --format '{{.Status}}' | grep -qi 'Up' && echo true || echo false)"
+  fi
+
+  # аптайм: сначала считаем сами, если не вышло — берём RunningFor
   UPTIME="-"
   if [[ -n "$STARTED_AT" && "$STARTED_AT" != "0001-01-01T00:00:00Z" ]]; then
-    START_TS=$(date -d "$STARTED_AT" +%s 2>/dev/null || echo "")
-    NOW_TS=$(date +%s)
-    if [[ -n "$START_TS" ]]; then
+    if START_TS=$(date -d "$STARTED_AT" +%s 2>/dev/null); then
+      NOW_TS=$(date +%s)
       SEC=$((NOW_TS-START_TS)); (( SEC<0 )) && SEC=0
       d=$((SEC/86400)); h=$(((SEC%86400)/3600)); m=$(((SEC%3600)/60))
       UPTIME=$(printf "%dd %02dh %02dm" "$d" "$h" "$m")
     fi
   fi
+  if [[ "$UPTIME" == "-" ]]; then
+    UPTIME="$(docker ps --filter "id=$CID" --format '{{.RunningFor}}' 2>/dev/null | head -n1)"
+    [[ -z "$UPTIME" ]] && UPTIME="-"
+  fi
 
-  echo -e "${cBold}${cC}Статус:${c0}  $STATUS  ${cDim}(running=$RUNNING, health=${HEALTH:-n/a})${c0}"
-  echo -e "${cBold}${cC}Аптайм:${c0}  $UPTIME"
+  [[ -z "$HEALTH" ]] && HEALTH="n/a"
 
-  # ports
+  echo -e "${cBold}${cC}Статус:${c0}  ${STATUS:-unknown}  ${cDim}(running=${RUNNING:-false}, health=${HEALTH})${c0}"
+  echo -e "${cBold}${cC}Аптайм:${c0}  ${UPTIME}"
+
+  # порты
   PORTS="$(docker inspect -f '{{range $p,$v := .NetworkSettings.Ports}}{{printf "%s -> " $p}}{{range $i, $b := $v}}{{printf "%s:%s " $b.HostIp $b.HostPort}}{{end}}{{printf "\n"}}{{end}}' "$CID" 2>/dev/null | sed '/^$/d' || true)"
   echo -e "${cBold}${cC}Порты:${c0}"
   if [[ -n "$PORTS" ]]; then echo "$PORTS" | sed 's/^/  /'; else echo "  -"; fi
   hr
 
-  # stats
+  # docker stats (оставляем как было, только CPU чистим аккуратно)
   STATS="$(docker stats "$CID" --no-stream --format '{{.CPUPerc}};{{.MemUsage}};{{.MemPerc}};{{.NetIO}};{{.BlockIO}};{{.PIDs}}' 2>/dev/null || true)"
   if [[ -n "$STATS" ]]; then
     IFS=';' read -r CPU_P MEM_USAGE MEM_P NET_IO BLK_IO PIDS <<< "$STATS"
-    CPU_P="${CPU_P//[^0-9.,]/}"
+    CPU_P="${CPU_P//[^0-9.,]/}"   # убираем % и пробелы
+    MEM_P="${MEM_P//[[:space:]]/}"
     echo -e "${cBold}${cG}CPU:${c0}       ${CPU_P:-0}%"
     echo -e "${cBold}${cG}RAM:${c0}       ${MEM_USAGE:-0/0}  (${MEM_P:-0})  PIDs: ${PIDS:-0}"
     echo -e "${cBold}${cG}Net I/O:${c0}   ${NET_IO:-0B/0B}   ${cBold}${cG}Block I/O:${c0} ${BLK_IO:-0B/0B}"
