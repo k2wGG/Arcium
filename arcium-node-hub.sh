@@ -1393,7 +1393,6 @@ main_menu() {
       9) exit 0 ;;
       *) ;;
     esac
-    echo -e "\n$(tr press_enter)"; read -r
   done
 }
 
