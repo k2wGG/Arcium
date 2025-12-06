@@ -29,7 +29,7 @@ warn() { echo -e "${clrYellow}[WARN]${clrReset} ${*:-}"; }
 err()  { echo -e "${clrRed}[ERROR]${clrReset} ${*:-}"; }
 hr()   { echo -e "${clrDim}────────────────────────────────────────────────────────${clrReset}"; }
 
-SCRIPT_VERSION="0.4.0"
+SCRIPT_VERSION="0.4.5"
 LANG_CHOICE="ru"
 
 # ---------- Defaults / env ----------
@@ -62,6 +62,7 @@ SEED_NODE="$BASE_DIR/node-keypair.seed.txt"
 SEED_CALLBACK="$BASE_DIR/callback-kp.seed.txt"
 PUB_NODE_FILE="$BASE_DIR/node-pubkey.txt"
 PUB_CALLBACK_FILE="$BASE_DIR/callback-pubkey.txt"
+BLS_KP="$BASE_DIR/bls-keypair.json"
 
 # ---------- i18n ----------
 choose_language() {
@@ -665,23 +666,47 @@ pull_image() { info "$(tr pull_image) $IMAGE"; docker pull "$IMAGE"; }
 start_container() {
   mkdir -p "$LOGS_DIR"; docker rm -f "$CONTAINER" >/dev/null 2>&1 || true
   info "$(tr start_container)"
-  docker run -d \
-    --name "$CONTAINER" \
-    -e NODE_IDENTITY_FILE=/usr/arx-node/node-keys/node_identity.pem \
-    -e NODE_KEYPAIR_FILE=/usr/arx-node/node-keys/node_keypair.json \
-    -e OPERATOR_KEYPAIR_FILE=/usr/arx-node/node-keys/operator_keypair.json \
-    -e CALLBACK_AUTHORITY_KEYPAIR_FILE=/usr/arx-node/node-keys/callback_authority_keypair.json \
-    -e NODE_CONFIG_PATH=/usr/arx-node/arx/node_config.toml \
-    -v "$CFG_FILE:/usr/arx-node/arx/node_config.toml" \
-    -v "$NODE_KP:/usr/arx-node/node-keys/node_keypair.json:ro" \
-    -v "$NODE_KP:/usr/arx-node/node-keys/operator_keypair.json:ro" \
-    -v "$CALLBACK_KP:/usr/arx-node/node-keys/callback_authority_keypair.json:ro" \
-    -v "$IDENTITY_PEM:/usr/arx-node/node-keys/node_identity.pem:ro" \
-    -v "$LOGS_DIR:/usr/arx-node/logs" \
-    -p 8080:8080 \
-    "$IMAGE"
+
+  if [[ -f "$BLS_KP" ]]; then
+    # Новый путь для v0.5.x (с BLS), порт 8080 оставляем как просил
+    docker run -d \
+      --name "$CONTAINER" \
+      --restart unless-stopped \
+      -e NODE_IDENTITY_FILE=/usr/arx-node/node-keys/node_identity.pem \
+      -e NODE_KEYPAIR_FILE=/usr/arx-node/node-keys/node_keypair.json \
+      -e CALLBACK_AUTHORITY_KEYPAIR_FILE=/usr/arx-node/node-keys/callback_authority_keypair.json \
+      -e BLS_PRIVATE_KEY_FILE=/usr/arx-node/node-keys/bls_keypair.json \
+      -e NODE_CONFIG_PATH=/usr/arx-node/arx/node_config.toml \
+      -v "$CFG_FILE:/usr/arx-node/arx/node_config.toml" \
+      -v "$NODE_KP:/usr/arx-node/node-keys/node_keypair.json:ro" \
+      -v "$CALLBACK_KP:/usr/arx-node/node-keys/callback_authority_keypair.json:ro" \
+      -v "$IDENTITY_PEM:/usr/arx-node/node-keys/node_identity.pem:ro" \
+      -v "$BLS_KP:/usr/arx-node/node-keys/bls_keypair.json:ro" \
+      -v "$LOGS_DIR:/usr/arx-node/logs" \
+      -p 8080:8080 \
+      "$IMAGE"
+  else
+    # Легаси режим 0.4.0 — как у тебя было
+    docker run -d \
+      --name "$CONTAINER" \
+      -e NODE_IDENTITY_FILE=/usr/arx-node/node-keys/node_identity.pem \
+      -e NODE_KEYPAIR_FILE=/usr/arx-node/node-keys/node_keypair.json \
+      -e OPERATOR_KEYPAIR_FILE=/usr/arx-node/node-keys/operator_keypair.json \
+      -e CALLBACK_AUTHORITY_KEYPAIR_FILE=/usr/arx-node/node-keys/callback_authority_keypair.json \
+      -e NODE_CONFIG_PATH=/usr/arx-node/arx/node_config.toml \
+      -v "$CFG_FILE:/usr/arx-node/arx/node_config.toml" \
+      -v "$NODE_KP:/usr/arx-node/node-keys/node_keypair.json:ro" \
+      -v "$NODE_KP:/usr/arx-node/node-keys/operator_keypair.json:ro" \
+      -v "$CALLBACK_KP:/usr/arx-node/node-keys/callback_authority_keypair.json:ro" \
+      -v "$IDENTITY_PEM:/usr/arx-node/node-keys/node_identity.pem:ro" \
+      -v "$LOGS_DIR:/usr/arx-node/logs" \
+      -p 8080:8080 \
+      "$IMAGE"
+  fi
+
   ok "$(tr container_started)"
 }
+
 stop_container()  { docker stop "$CONTAINER" && ok "$(tr container_stopped)" || true; }
 remove_container(){ docker rm -f "$CONTAINER" && ok "$(tr container_removed)" || true; }
 restart_container(){ docker restart "$CONTAINER" && ok "$(tr container_restarted)" || true; }
@@ -950,6 +975,105 @@ migration_030_to_040() {
   echo -e "\n$(tr press_enter)"; read -r
 }
 
+migration_040_to_050() {
+  clear; display_logo; hr
+  echo -e "${clrBold}${clrMag}Миграция 0.4.0 → 0.5.x${clrReset}\n"; hr
+
+  mkdir -p "$BASE_DIR" "$LOGS_DIR"
+
+  # Проверяем, что старые ключи на месте (кошельки переиспользуем)
+  for f in "$NODE_KP" "$CALLBACK_KP" "$IDENTITY_PEM"; do
+    if [[ ! -f "$f" ]]; then
+      err "Не найден ключ: $f. Миграция невозможна. Убедись, что запускаешь на старой ноде 0.4."
+      echo -e "\n$(tr press_enter)"; read -r
+      return
+    fi
+  done
+
+  # Обновляем Arcium tooling по официальной доке
+  info "Обновляю Arcium CLI и ARX node через install.arcium.com..."
+  if ! curl --proto '=https' --tlsv1.2 -sSfL https://install.arcium.com/ | bash; then
+    warn "install.arcium.com завершился с ошибкой. Проверь сеть/скрипт и повтори."
+  fi
+
+  path_prepend "$HOME/.arcium/bin"
+  hash -r || true
+
+  if ! ensure_cmd arcium; then
+    err "Arcium CLI не найден после обновления. Проверь установку."
+    echo -e "\n$(tr press_enter)"; read -r
+    return
+  fi
+
+  # Создаём BLS-ключ, если его ещё нет — НОВЫЙ ключ, но не кошелёк
+  if [[ ! -f "$BLS_KP" || ! -s "$BLS_KP" ]]; then
+    info "Генерирую BLS-ключ (bls-keypair.json) для ноды..."
+    (
+      cd "$BASE_DIR"
+      arcium gen-bls-key "$(basename "$BLS_KP")"
+    ) || {
+      err "Не удалось сгенерировать BLS-ключ."
+      echo -e "\n$(tr press_enter)"; read -r
+      return
+    }
+  else
+    ok "Найден существующий BLS-ключ: $BLS_KP"
+  fi
+
+  # OFFSET / IP / RPC берём из .env/конфига, при необходимости спрашиваем
+  ensure_offsets
+  if [[ -z "${OFFSET:-}" ]]; then
+    read -rp "$(tr ask_offset) " OFFSET
+    sanitize_offset
+  fi
+
+  if [[ -z "${RPC_HTTP:-}" ]]; then
+    RPC_HTTP="$RPC_DEFAULT_HTTP"
+  fi
+
+  if [[ -z "${PUBLIC_IP:-}" ]]; then
+    PUBLIC_IP=$(curl -4 -s https://ipecho.net/plain || echo "0.0.0.0")
+  fi
+
+  save_env
+
+  # node-config.toml — если не существует, создаём из шаблона
+  if [[ ! -f "$CFG_FILE" ]]; then
+    warn "Файл node-config.toml не найден — создаю по шаблону..."
+    write_config
+  fi
+
+  # Переинициализация on-chain аккаунтов с учётом BLS-ключа
+  info "Переинициализирую on-chain аккаунты ноды с BLS-ключом (init-arx-accs)..."
+  (
+    cd "$BASE_DIR"
+    arcium init-arx-accs \
+      --keypair-path "$NODE_KP" \
+      --callback-keypair-path "$CALLBACK_KP" \
+      --peer-keypair-path "$IDENTITY_PEM" \
+      --bls-keypair-path "$BLS_KP" \
+      --node-offset "$OFFSET" \
+      --ip-address "$PUBLIC_IP" \
+      --rpc-url "$RPC_HTTP"
+  ) || warn "init-arx-accs вернул ошибку. Если это конфликт / повторная инициализация — проверь вывод выше."
+
+  # Обновляем образ на актуальный arcium/arx-node (v0.5.x по доке)
+  info "Переключаюсь на новый образ arcium/arx-node (v0.5.x)..."
+  IMAGE="arcium/arx-node"
+  save_env
+
+  info "Останавливаю и удаляю старый контейнер $CONTAINER..."
+  docker rm -f "$CONTAINER" >/dev/null 2>&1 || true
+
+  pull_image
+  start_container
+  status_table
+
+  ok "Миграция 0.4.0 → 0.5.x завершена."
+  echo -e "\n$(tr press_enter)"; read -r
+}
+
+
 remove_node_full() {
   clear; display_logo; hr
   echo -e "${clrBold}${clrMag}$(tr manage_remove_node)${clrReset}\n"; hr
@@ -968,6 +1092,7 @@ remove_node_full() {
   echo "      • node-pubkey.txt"
   echo "      • callback-pubkey.txt"
   echo "      • .env (файл окружения ноды, если существует)"
+  echo "      • bls-keypair.json (BLS-ключ ноды)"
   echo
   echo "После этого восстановить эти ключи из файлов будет невозможно. Нужны заранее сохранённые сид-фразы."
   echo
@@ -1143,13 +1268,16 @@ install_and_run_menu() {
 main_menu() {
   choose_language
   info "$(tr need_root_warn)" || true
-  while true; do
+    while true; do
     clear; display_logo; hr
     local MIG_LABEL
+    local MIG_LABEL2
     if [[ "$LANG_CHOICE" == "en" ]]; then
       MIG_LABEL="Migration 0.3.0 → 0.4.0"
+      MIG_LABEL2="Migration 0.4.0 → 0.5.x"
     else
       MIG_LABEL="Миграция 0.3.0 → 0.4.0"
+      MIG_LABEL2="Миграция 0.4.0 → 0.5.x"
     fi
 
     echo -e "${clrBold}${clrMag}$(tr menu_title)${clrReset} ${clrDim}(v${SCRIPT_VERSION})${clrReset}\n"
@@ -1159,8 +1287,9 @@ main_menu() {
     echo -e "${clrGreen}4)${clrReset} $(tr m3_config)"
     echo -e "${clrGreen}5)${clrReset} $(tr m4_tools)"
     echo -e "${clrGreen}6)${clrReset} ${MIG_LABEL}"
-    echo -e "${clrGreen}7)${clrReset} $(tr manage_remove_node)"
-    echo -e "${clrGreen}8)${clrReset} $(tr m5_exit)"
+    echo -e "${clrGreen}7)${clrReset} ${MIG_LABEL2}"
+    echo -e "${clrGreen}8)${clrReset} $(tr manage_remove_node)"
+    echo -e "${clrGreen}9)${clrReset} $(tr m5_exit)"
     hr
     read -rp "> " choice
     case "${choice:-}" in
@@ -1170,8 +1299,9 @@ main_menu() {
       4) config_menu ;;
       5) tools_menu ;;
       6) migration_030_to_040 ;;
-      7) remove_node_full ;;
-      8) exit 0 ;;
+      7) migration_040_to_050 ;;
+      8) remove_node_full ;;
+      9) exit 0 ;;
       *) ;;
     esac
     echo -e "\n$(tr press_enter)"; read -r
@@ -1179,4 +1309,3 @@ main_menu() {
 }
 
 main_menu
-
