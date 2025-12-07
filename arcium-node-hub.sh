@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # =====================================================================
 #  Arcium-Node-Hub — RU/EN interactive installer/manager (Docker)
-#  Version: 0.5.1-mig (based on 0.4.0, added BLS key + 0.4 → 0.5.1 migration)
+#  Version: 0.5.2-mig (based on 0.4.0, added BLS key + 0.4 → 0.5.1 migration)
 # =====================================================================
 set -Eeuo pipefail
 
@@ -29,7 +29,7 @@ warn() { echo -e "${clrYellow}[WARN]${clrReset} ${*:-}"; }
 err()  { echo -e "${clrRed}[ERROR]${clrReset} ${*:-}"; }
 hr()   { echo -e "${clrDim}────────────────────────────────────────────────────────${clrReset}"; }
 
-SCRIPT_VERSION="0.5.1-mig"
+SCRIPT_VERSION="0.5.2-mig"
 LANG_CHOICE="ru"
 
 # ---------- Defaults / env ----------
@@ -760,7 +760,7 @@ start_container() {
   local extra_envs=()
   local extra_vols=()
   if [[ -f "$BLS_KP" ]]; then
-    extra_envs+=( -e BLS_KEYPAIR_FILE=/usr/arx-node/node-keys/bls-keypair.json )
+    extra_envs+=( -e BLS_PRIVATE_KEY_FILE=/usr/arx-node/node-keys/bls-keypair.json )
     extra_vols+=( -v "$BLS_KP:/usr/arx-node/node-keys/bls-keypair.json:ro" )
   fi
 
