@@ -131,8 +131,6 @@ tr() {
       manage_restart) echo "Restart container";;
       manage_stop) echo "Stop container";;
       manage_remove) echo "Remove container";;
-      manage_status) echo "Status";;
-      cfg_edit_rpc_http) echo "Edit RPC_HTTP";;
       cfg_edit_rpc_wss)  echo "Edit RPC_WSS";;
       installing_prereqs) echo "Installing prerequisites (Rust, Solana CLI, Node/Yarn, Anchor, Arcium CLI)...";;
       prereqs_done) echo "Prerequisites installed";;
@@ -144,6 +142,8 @@ tr() {
       manage_status) echo "Status";;
       manage_remove_node) echo "Full node removal (container + files)";;
       cfg_edit_rpc_http) echo "Edit RPC_HTTP";;
+	  seeds_menu) echo "Show seed phrases";;
+	  show_versions) echo "Show Arcium / arcup versions";;
     esac;;
     *) case "$k" in
       need_root_warn) echo "Некоторые шаги требуют sudo/root. Вас попросят ввести пароль при необходимости.";;
@@ -188,8 +188,6 @@ tr() {
       manage_restart) echo "Перезапустить контейнер";;
       manage_stop) echo "Остановить контейнер";;
       manage_remove) echo "Удалить контейнер";;
-      manage_status) echo "Статус";;
-      cfg_edit_rpc_http) echo "Изменить RPC_HTTP";;
       cfg_edit_rpc_wss)  echo "Изменить RPC_WSS";;
       installing_prereqs) echo "Устанавливаю зависимости (Rust, Solana CLI, Node/Yarn, Anchor, Arcium CLI)...";;
       prereqs_done) echo "Зависимости установлены";;
@@ -201,6 +199,8 @@ tr() {
       manage_status) echo "Статус";;
       manage_remove_node) echo "Полное удаление ноды (контейнер + файлы)";;
       cfg_edit_rpc_http) echo "Изменить RPC_HTTP";;
+	  seeds_menu) echo "Показать сид-фразы";;
+	  show_versions) echo "Показать версии Arcium / arcup";;
     esac;;
   esac
 }
@@ -719,6 +719,48 @@ show_keys_balances() {
   echo "Faucet (Devnet): https://faucet.solana.com/"
   echo "CLI airdrop:     solana airdrop 2 $node_pk -u devnet ; solana airdrop 2 $cb_pk -u devnet"
   hr
+}
+
+show_versions() {
+  clear; display_logo; hr
+  echo -e "${clrBold}${clrMag}$(tr show_versions)${clrReset}\n"; hr
+
+  local arcium_ver arcup_ver container_image
+
+  # Версия arcium
+  if ensure_cmd arcium; then
+    arcium_ver="$(arcium --version 2>&1 || echo 'error')"
+  else
+    arcium_ver="arcium: not found in PATH"
+  fi
+
+  # Версия arcup
+  if [[ -x "$HOME/.cargo/bin/arcup" ]]; then
+    arcup_ver="$("$HOME/.cargo/bin/arcup" --version 2>&1 || echo 'error')"
+  elif ensure_cmd arcup; then
+    arcup_ver="$(arcup --version 2>&1 || echo 'error')"
+  else
+    arcup_ver="arcup: not found"
+  fi
+
+  # Образ контейнера: что реально у контейнера и что прописано в ENV (IMAGE)
+  if ensure_cmd docker; then
+    container_image="$(docker ps -a --filter "name=$CONTAINER" --format '{{.Image}}' | head -n1 2>/dev/null || true)"
+    if [[ -z "$container_image" ]]; then
+      # Контейнер не найден — показываем только запланированный образ из ENV
+      container_image="container not found (planned IMAGE=${IMAGE})"
+    else
+      container_image="${container_image} (running, ENV IMAGE=${IMAGE})"
+    fi
+  else
+    container_image="docker: not found (ENV IMAGE=${IMAGE})"
+  fi
+
+  echo "arcium:    ${arcium_ver}"
+  echo "arcup:     ${arcup_ver}"
+  echo "container: ${container_image}"
+
+  echo -e "\n$(tr press_enter)"; read -r
 }
 
 try_airdrop() {
@@ -1316,7 +1358,8 @@ tools_menu() {
     echo -e "${clrGreen}6)${clrReset} $(tr check_membership_lbl)"
     echo -e "${clrGreen}7)${clrReset} $(tr show_keys)"
     echo -e "${clrGreen}8)${clrReset} Airdrop (Devnet)"
-    echo -e "${clrGreen}9)${clrReset} Показать сид-фразы"
+    echo -e "${clrGreen}9)${clrReset} $(tr seeds_menu)"
+	echo -e "${clrGreen}10)${clrReset} $(tr show_versions)"
     echo -e "${clrGreen}0)${clrReset} $(tr m5_exit)"
     hr
     read -rp "> " c
@@ -1330,6 +1373,7 @@ tools_menu() {
       7) show_keys_balances ;;
       8) try_airdrop ;;
       9) show_seed_phrases ;;
+	  10) show_versions ;;
       0) return ;;
       *) ;;
     esac
