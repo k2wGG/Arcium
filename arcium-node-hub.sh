@@ -893,7 +893,6 @@ start_container() {
     -v "$IDENTITY_PEM:/usr/arx-node/node-keys/node_identity.pem:ro" \
     -v "$LOGS_DIR:/usr/arx-node/logs" \
     "${extra_vols[@]}" \
-    -p 8081:8080 \
 	-p 8001:8001 \
 	-p 8002:8002 \
     "$IMAGE"
