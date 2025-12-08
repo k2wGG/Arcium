@@ -73,6 +73,7 @@ SEED_CALLBACK="$BASE_DIR/callback-kp.seed.txt"
 PUB_NODE_FILE="$BASE_DIR/node-pubkey.txt"
 PUB_CALLBACK_FILE="$BASE_DIR/callback-pubkey.txt"
 BLS_KP="$BASE_DIR/bls-keypair.json"        # NEW: BLS keypair for 0.5.1
+BLS_KP_BIN="$BASE_DIR/bls-keypair.bin"     # RAW 32 bytes (обход бага CLI)
 
 # ---------- i18n ----------
 choose_language() {
@@ -280,10 +281,12 @@ arcium_init_supports_operator_meta() {
 
 
 generate_bls_key() {
-  if [[ -f "$BLS_KP" && -s "$BLS_KP" ]]; then
-    ok "BLS-ключ уже существует: $BLS_KP"
+  # Если уже есть и json, и bin — просто выходим
+  if [[ -f "$BLS_KP" && -s "$BLS_KP" && -f "$BLS_KP_BIN" && -s "$BLS_KP_BIN" ]]; then
+    ok "BLS-ключ уже существует: $BLS_KP (+ $BLS_KP_BIN)"
     return 0
   fi
+
   if ! ensure_cmd arcium; then
     err "Arcium CLI не найден (команда arcium). Обнови/установи Arcium CLI и повтори."
     return 1
@@ -292,13 +295,40 @@ generate_bls_key() {
     warn "Текущая версия Arcium CLI не поддерживает gen-bls-key. Пропускаю генерацию BLS-ключа."
     return 1
   fi
+
   mkdir -p "$BASE_DIR"
-  info "Генерирую BLS-ключ для 0.5.1..."
+  info "Генерирую BLS-ключ (JSON) для 0.5.x..."
   (
     cd "$BASE_DIR"
     arcium gen-bls-key "$(basename "$BLS_KP")"
-  ) || { err "Не удалось сгенерировать BLS-ключ"; return 1; }
-  ok "BLS-ключ сохранён в $BLS_KP"
+  ) || { err "Не удалось сгенерировать BLS-ключ (JSON)"; return 1; }
+
+  # Валидация JSON и конвертация в сырые 32 байта
+  python3 <<PY || {
+import json
+from pathlib import Path
+
+src = Path("$BLS_KP")
+dst = Path("$BLS_KP_BIN")
+
+data = json.loads(src.read_text().strip())
+if not isinstance(data, list) or len(data) != 32:
+    raise SystemExit(f"Unexpected BLS format: type={type(data)}, len={len(data)}")
+
+for i, v in enumerate(data):
+    if not isinstance(v, int):
+        raise SystemExit(f"Index {i}: not int ({type(v)})")
+    if not (0 <= v <= 255):
+        raise SystemExit(f"Index {i}: out of range ({v})")
+
+dst.write_bytes(bytes(data))
+print("Wrote", dst, "size", dst.stat().st_size, "bytes")
+PY
+    err "BLS-ключ (JSON) сгенерирован, но не прошёл валидацию/конвертацию. Проверь файл $BLS_KP."
+    return 1
+  }
+
+  ok "BLS-ключ сохранён в $BLS_KP (JSON) и $BLS_KP_BIN (raw 32 bytes)"
 }
 
 run_init_arx_accs() {
@@ -307,8 +337,8 @@ run_init_arx_accs() {
     return 1
   fi
 
-  # Строим список аргументов динамически
-  local args=(
+  # Базовые аргументы
+  local base_args=(
     init-arx-accs
     --keypair-path "$NODE_KP"
     --callback-keypair-path "$CALLBACK_KP"
@@ -318,24 +348,65 @@ run_init_arx_accs() {
     --rpc-url "$RPC_HTTP"
   )
 
-  # BLS-ключ если есть и CLI поддерживает
-  if [[ -f "$BLS_KP" && -s "$BLS_KP" ]] && arcium_init_supports_bls_flag; then
-    args+=( --bls-keypair-path "$BLS_KP" )
-  fi
-
-  # Метадата оператора, если CLI знает эти флаги
+  # Метадата оператора, если CLI умеет
   if arcium_init_supports_operator_meta; then
-    args+=(
+    base_args+=(
       --operator-url "$OPERATOR_URL"
       --operator-location "$OPERATOR_LOCATION"
       --resource-claim "$RESOURCE_CLAIM"
     )
   fi
 
-  (
-    cd "$BASE_DIR"
-    arcium "${args[@]}"
-  )
+  # Выбор пути к BLS-ключу для init-arx-accs:
+  # 1) если есть raw .bin — используем его (обход бага JSON)
+  # 2) иначе — JSON
+  local bls_arg=""
+  if arcium_init_supports_bls_flag; then
+    if [[ -f "$BLS_KP_BIN" && -s "$BLS_KP_BIN" ]]; then
+      bls_arg="$BLS_KP_BIN"
+    elif [[ -f "$BLS_KP" && -s "$BLS_KP" ]]; then
+      bls_arg="$BLS_KP"
+    fi
+  fi
+
+  cd "$BASE_DIR" || return 1
+
+  local args=("${base_args[@]}")
+  if [[ -n "$bls_arg" ]]; then
+    args+=( --bls-keypair-path "$bls_arg" )
+  fi
+
+  local out
+  if ! out="$(arcium "${args[@]}" 2>&1)"; then
+    echo "$out"
+
+    # 1) Специфический баг BLS JSON → пробуем fallback на .bin
+    if echo "$out" | grep -q "Failed to convert BLS keypair to 32 byte array"; then
+      if [[ "$bls_arg" = "$BLS_KP" && -f "$BLS_KP_BIN" && -s "$BLS_KP_BIN" ]]; then
+        warn "init-arx-accs: BLS JSON не принят CLI. Пробую повторно с raw 32-byte ключом ($BLS_KP_BIN)..."
+        args=("${base_args[@]}" --bls-keypair-path "$BLS_KP_BIN")
+        if out="$(arcium "${args[@]}" 2>&1)"; then
+          echo "$out"
+          ok "init-arx-accs успешно выполнен с raw 32-byte BLS-ключом."
+          return 0
+        else
+          echo "$out"
+        fi
+      fi
+    fi
+
+    # 2) Оператор уже инициализирован ончейн — считаем это успехом
+    if echo "$out" | grep -q "Allocate: account Address .* already in use"; then
+      warn "InitOperator: аккаунт оператора уже существует на Devnet. Считаю init-arx-accs успешно выполненным ранее."
+      return 0
+    fi
+
+    err "init-arx-accs завершился с ошибкой."
+    return 1
+  fi
+
+  echo "$out"
+  return 0
 }
 
 # ==================== Installers (server prep) ====================
@@ -795,6 +866,7 @@ show_logs_follow() {
   echo -e "${clrDim}$(tr show_logs_hint)${clrReset}\n"
   docker exec -it "$CONTAINER" sh -lc 'tail -n +1 -f "$(ls -t /usr/arx-node/logs/arx_log_*.log 2>/dev/null | head -1)"' || true
 }
+
 
 _get_offset_or_prompt() {
   ensure_offsets
