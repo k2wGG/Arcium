@@ -894,6 +894,8 @@ start_container() {
     -v "$LOGS_DIR:/usr/arx-node/logs" \
     "${extra_vols[@]}" \
     -p 8081:8080 \
+	-p 8001:8001 \
+	-p 8002:8002 \
     "$IMAGE"
   ok "$(tr container_started)"
 }
